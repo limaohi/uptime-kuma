@@ -11,68 +11,132 @@ on:
 permissions:
   contents: write
 
+env:
+  NODE_VERSION: "20"
+
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Check versions
+      - name: Show project information
+        shell: bash
         run: |
+          set -euo pipefail
           node --version
           npm --version
           node -p "require('./package.json').version"
+          node -e "console.log(JSON.stringify(require('./package.json').scripts, null, 2))"
 
-      - name: Install production dependencies
-        run: npm ci --omit=dev --no-audit
+      - name: Install all dependencies
+        run: npm ci --no-audit
+
+      - name: Build application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if npm run | grep -qE '^  build'; then
+            npm run build
+          elif npm run | grep -qE '^  build:backend'; then
+            npm run build:backend
+          else
+            echo "No build script was found."
+            echo "Available scripts:"
+            npm run
+            exit 1
+          fi
 
       - name: Download distribution files
         run: npm run download-dist
 
-      - name: Verify application
+      - name: Verify build output
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -f server/server.js
-          test -f package.json
           test -d node_modules
+          test -d dist
+          test -n "$(find dist -type f -print -quit)"
+
+          echo "server/server.js:"
+          ls -lh server/server.js
+
+          echo "dist size:"
+          du -sh dist
+
+          echo "dist files:"
+          find dist -maxdepth 2 -type f | head -30
+
+      - name: Test production entrypoint
+        shell: bash
+        run: |
+          set +e
+          timeout 30s node server/server.js
+          code=$?
+          set -e
+
+          if [ "$code" -ne 124 ]; then
+            echo "Application exited unexpectedly with code: $code"
+            exit "$code"
+          fi
+
+          echo "Application stayed alive for 30 seconds."
+
+      - name: Remove development dependencies
+        run: npm prune --omit=dev
+
+      - name: Verify production dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d node_modules
+          test -f server/server.js
+          test -d dist
+          test -n "$(find dist -type f -print -quit)"
 
       - name: Prepare package
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./package.json').version")
-          SHORT_SHA=${GITHUB_SHA::7}
-          PACKAGE_NAME=uptime-kuma-${VERSION}-node20-${SHORT_SHA}
+
+          VERSION="$(node -p "require('./package.json').version")"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          PACKAGE_NAME="uptime-kuma-${VERSION}-node${NODE_VERSION}-${SHORT_SHA}"
 
           rm -rf package
-          mkdir -p package/${PACKAGE_NAME}/data
+          mkdir -p "package/${PACKAGE_NAME}/data"
 
-          cp -a server package/${PACKAGE_NAME}/
-          cp -a node_modules package/${PACKAGE_NAME}/
-          cp -a package.json package/${PACKAGE_NAME}/
-          cp -a package-lock.json package/${PACKAGE_NAME}/
+          cp -a server "package/${PACKAGE_NAME}/"
+          cp -a node_modules "package/${PACKAGE_NAME}/"
+          cp -a dist "package/${PACKAGE_NAME}/"
+          cp -a package.json "package/${PACKAGE_NAME}/"
+          cp -a package-lock.json "package/${PACKAGE_NAME}/"
 
-          for item in public extra dist frontend; do
+          for item in src public extra frontend; do
             if [ -e "${item}" ]; then
-              cp -a "${item}" package/${PACKAGE_NAME}/
+              cp -a "${item}" "package/${PACKAGE_NAME}/"
             fi
           done
 
           printf '%s\n' \
             "version=${VERSION}" \
-            "node_major=20" \
+            "node_major=${NODE_VERSION}" \
             "commit=${GITHUB_SHA}" \
             "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            > package/${PACKAGE_NAME}/VERSION
+            > "package/${PACKAGE_NAME}/VERSION"
 
           printf '%s\n' \
             '#!/usr/bin/env bash' \
@@ -81,24 +145,38 @@ jobs:
             'export NODE_ENV="${NODE_ENV:-production}"' \
             'export UPTIME_KUMA_IS_CONTAINER="${UPTIME_KUMA_IS_CONTAINER:-1}"' \
             'exec node server/server.js' \
-            > package/${PACKAGE_NAME}/start.sh
+            > "package/${PACKAGE_NAME}/start.sh"
 
-          chmod +x package/${PACKAGE_NAME}/start.sh
+          chmod +x "package/${PACKAGE_NAME}/start.sh"
 
           tar --owner=0 --group=0 --numeric-owner \
-            -czf ${PACKAGE_NAME}.tar.gz \
-            -C package ${PACKAGE_NAME}
+            -czf "${PACKAGE_NAME}.tar.gz" \
+            -C package "${PACKAGE_NAME}"
 
-          sha256sum ${PACKAGE_NAME}.tar.gz > ${PACKAGE_NAME}.tar.gz.sha256
-          echo PACKAGE_NAME=${PACKAGE_NAME} >> ${GITHUB_ENV}
+          sha256sum "${PACKAGE_NAME}.tar.gz" \
+            > "${PACKAGE_NAME}.tar.gz.sha256"
 
-      - name: Show package information
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Verify archive contents
+        shell: bash
         run: |
-          ls -lh ${PACKAGE_NAME}.tar.gz ${PACKAGE_NAME}.tar.gz.sha256
-          tar -tzf ${PACKAGE_NAME}.tar.gz | head -50
+          set -euo pipefail
+
+          tar -tzf "${PACKAGE_NAME}.tar.gz" \
+            | grep -E "/server/server\.js$"
+
+          tar -tzf "${PACKAGE_NAME}.tar.gz" \
+            | grep -E "/dist/"
+
+          tar -tzf "${PACKAGE_NAME}.tar.gz" \
+            | grep -E "/node_modules/"
+
+          echo "Archive size:"
+          ls -lh "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}.tar.gz.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: uptime-kuma-node-package
           path: |
