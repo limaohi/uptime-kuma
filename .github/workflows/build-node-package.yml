@@ -31,26 +31,27 @@ jobs:
         run: |
           node --version
           npm --version
+          node -p "require('./package.json').version"
 
-      - name: Install and build
-        run: npm run setup
+      - name: Inspect setup scripts
+        run: |
+          node -e "console.log(require('./package.json').scripts)"
+
+      - name: Install production dependencies
+        run: |
+          npm ci --omit=dev --no-audit
+
+      - name: Download distribution files
+        run: |
+          npm run download-dist
 
       - name: Verify application
-        run: |
-          test -f server/server.js
-          test -d node_modules
-          test -f package.json
-
-      - name: Remove unnecessary files
         shell: bash
         run: |
-          rm -rf .git
-          rm -rf .github
-          rm -rf test
-          rm -rf docs
-          rm -rf coverage
-          rm -rf .vscode
-          rm -rf .idea
+          set -euo pipefail
+          test -f server/server.js
+          test -f package.json
+          test -d node_modules
 
       - name: Prepare package
         shell: bash
@@ -61,49 +62,57 @@ jobs:
           SHORT_SHA="${GITHUB_SHA::7}"
           PACKAGE_NAME="uptime-kuma-${VERSION}-node20-${SHORT_SHA}"
 
-          mkdir -p package
-          mkdir -p "${PACKAGE_NAME}/data"
+          rm -rf package
+          mkdir -p "package/${PACKAGE_NAME}/data"
 
-          cp -a server "${PACKAGE_NAME}/"
-          cp -a node_modules "${PACKAGE_NAME}/"
-          cp -a package.json "${PACKAGE_NAME}/"
-          cp -a package-lock.json "${PACKAGE_NAME}/"
+          cp -a server "package/${PACKAGE_NAME}/"
+          cp -a node_modules "package/${PACKAGE_NAME}/"
+          cp -a package.json "package/${PACKAGE_NAME}/"
+          cp -a package-lock.json "package/${PACKAGE_NAME}/"
 
-          for item in public extra dist; do
+          for item in public extra dist frontend; do
             if [ -e "${item}" ]; then
-              cp -a "${item}" "${PACKAGE_NAME}/"
+              cp -a "${item}" "package/${PACKAGE_NAME}/"
             fi
           done
 
-          cat > "${PACKAGE_NAME}/VERSION" <<EOF
-          version=${VERSION}
-          node_major=20
-          commit=${GITHUB_SHA}
-          built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
+          cat > "package/${PACKAGE_NAME}/VERSION" <<EOF
+version=${VERSION}
+node_major=20
+commit=${GITHUB_SHA}
+built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
 
-          cat > "${PACKAGE_NAME}/start.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -e
+          cat > "package/${PACKAGE_NAME}/start.sh" <<'EOF'
+#!/usr/bin/env bash
+set -e
 
-          cd "$(dirname "$0")"
+cd "$(dirname "$0")"
 
-          export NODE_ENV="${NODE_ENV:-production}"
-          export UPTIME_KUMA_IS_CONTAINER="${UPTIME_KUMA_IS_CONTAINER:-1}"
+export NODE_ENV="${NODE_ENV:-production}"
+export UPTIME_KUMA_IS_CONTAINER="${UPTIME_KUMA_IS_CONTAINER:-1}"
 
-          exec node server/server.js
-          EOF
+exec node server/server.js
+EOF
 
-          chmod +x "${PACKAGE_NAME}/start.sh"
+          chmod +x "package/${PACKAGE_NAME}/start.sh"
 
           tar \
             --owner=0 \
             --group=0 \
             --numeric-owner \
             -czf "${PACKAGE_NAME}.tar.gz" \
+            -C package \
             "${PACKAGE_NAME}"
 
           sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
+
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Show package information
+        run: |
+          ls -lh "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}.tar.gz.sha256"
+          tar -tzf "${PACKAGE_NAME}.tar.gz" | head -50
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
