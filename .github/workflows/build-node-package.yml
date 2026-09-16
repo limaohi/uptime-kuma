@@ -47,13 +47,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if npm run | grep -qE '^  build'; then
+          SCRIPTS="$(node -e "console.log(Object.keys(require('./package.json').scripts || {}).join(' '))")"
+
+          if echo "${SCRIPTS}" | grep -qw build; then
             npm run build
-          elif npm run | grep -qE '^  build:backend'; then
+          elif echo "${SCRIPTS}" | grep -qw build:backend; then
             npm run build:backend
           else
             echo "No build script was found."
-            echo "Available scripts:"
             npm run
             exit 1
           fi
@@ -69,7 +70,9 @@ jobs:
           test -f server/server.js
           test -d node_modules
           test -d dist
-          test -n "$(find dist -type f -print -quit)"
+
+          DIST_FILE="$(find dist -type f -print -quit)"
+          test -n "${DIST_FILE}"
 
           echo "server/server.js:"
           ls -lh server/server.js
@@ -77,20 +80,20 @@ jobs:
           echo "dist size:"
           du -sh dist
 
-          echo "dist files:"
-          find dist -maxdepth 2 -type f | head -30
+          echo "First dist files:"
+          find dist -maxdepth 2 -type f -print | sed -n '1,30p'
 
       - name: Test production entrypoint
         shell: bash
         run: |
           set +e
           timeout 30s node server/server.js
-          code=$?
+          CODE=$?
           set -e
 
-          if [ "$code" -ne 124 ]; then
-            echo "Application exited unexpectedly with code: $code"
-            exit "$code"
+          if [ "${CODE}" -ne 124 ]; then
+            echo "Application exited unexpectedly with code: ${CODE}"
+            exit "${CODE}"
           fi
 
           echo "Application stayed alive for 30 seconds."
@@ -98,12 +101,13 @@ jobs:
       - name: Remove development dependencies
         run: npm prune --omit=dev
 
-      - name: Verify production dependencies
+      - name: Verify production package
         shell: bash
         run: |
           set -euo pipefail
-          test -d node_modules
+
           test -f server/server.js
+          test -d node_modules
           test -d dist
           test -n "$(find dist -type f -print -quit)"
 
@@ -163,17 +167,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          tar -tzf "${PACKAGE_NAME}.tar.gz" \
-            | grep -E "/server/server\.js$"
+          ARCHIVE_LIST="$(tar -tzf "${PACKAGE_NAME}.tar.gz")"
 
-          tar -tzf "${PACKAGE_NAME}.tar.gz" \
-            | grep -E "/dist/"
+          echo "Checking server/server.js"
+          echo "${ARCHIVE_LIST}" | grep -qE "/server/server\.js$"
 
-          tar -tzf "${PACKAGE_NAME}.tar.gz" \
-            | grep -E "/node_modules/"
+          echo "Checking dist"
+          echo "${ARCHIVE_LIST}" | grep -qE "/dist/"
+
+          echo "Checking node_modules"
+          echo "${ARCHIVE_LIST}" | grep -qE "/node_modules/"
 
           echo "Archive size:"
-          ls -lh "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}.tar.gz.sha256"
+          ls -lh "${PACKAGE_NAME}.tar.gz" \
+            "${PACKAGE_NAME}.tar.gz.sha256"
+
+          echo "First archive files:"
+          printf '%s\n' "${ARCHIVE_LIST}" | sed -n '1,80p'
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v5
